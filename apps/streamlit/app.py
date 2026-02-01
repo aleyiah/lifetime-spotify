@@ -5,6 +5,7 @@ import zipfile
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Tuple
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -215,7 +216,7 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
         )
 
         meta["total_events"] = len(df)
-        
+
         # Privacy: drop any IP-related or sensitive network fields if present
         sensitive_cols = [
             "ip_addr",
@@ -224,9 +225,7 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
             "conn_ip",
             "network_ip",
         ]
-
         df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
-
 
         # Enforce canonical schema
         expected_cols = {
@@ -242,6 +241,40 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
             raise ValueError(f"Missing expected columns: {missing}")
 
     return df, meta
+
+
+# =========================
+# Era helpers (month-granular, UTC)
+# =========================
+
+def month_start_utc(year: int, month: int) -> pd.Timestamp:
+    return pd.Timestamp(datetime(year, month, 1, tzinfo=timezone.utc))
+
+
+def next_month_start_utc(year: int, month: int) -> pd.Timestamp:
+    if month == 12:
+        return pd.Timestamp(datetime(year + 1, 1, 1, tzinfo=timezone.utc))
+    return pd.Timestamp(datetime(year, month + 1, 1, tzinfo=timezone.utc))
+
+
+def ranges_overlap(a_start: pd.Timestamp, a_end_excl: pd.Timestamp,
+                   b_start: pd.Timestamp, b_end_excl: pd.Timestamp) -> bool:
+    # Half-open intervals: [start, end)
+    return (a_start < b_end_excl) and (b_start < a_end_excl)
+
+
+def apply_era_filter_month(df: pd.DataFrame, start_year: int, start_month: int, end_year: int, end_month: int) -> pd.DataFrame:
+    start_ts = month_start_utc(start_year, start_month)
+    end_exclusive = next_month_start_utc(end_year, end_month)
+    return df[(df["ts_utc"] >= start_ts) & (df["ts_utc"] < end_exclusive)].copy()
+
+
+def safe_rerun() -> None:
+    # Works across Streamlit versions
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
 
 
 # =========================
@@ -328,25 +361,53 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st.write(f"Type: **list**  |  Length: **{len(json_obj)}**")
         st.json(json_obj[:2])
     elif isinstance(json_obj, dict):
-        st.write(f"Type: **dict**  |  Keys: **{len(json_obj.keys())}**")
+        st.write(f"Type: **dict**  |  Keys: **{len(json_obj)}**")
         st.json(dict(list(json_obj.items())[:10]))
     else:
         st.write(f"Type: **{type(json_obj).__name__}**")
         st.json(json_obj)
 
+    # =====================================================
+    # NEW: Merge all listening data (cached in session state)
+    # =====================================================
+
     st.subheader("Merge all listening data")
+
+    # Initialize session state containers
+    if "df_events" not in st.session_state:
+        st.session_state.df_events = None
+    if "meta" not in st.session_state:
+        st.session_state.meta = None
+    if "merged" not in st.session_state:
+        st.session_state.merged = False
+    if "eras" not in st.session_state:
+        st.session_state.eras = []
 
     merge_now = st.button("Concatenate streaming history files")
 
+    # When clicked, compute once and store results
     if merge_now:
         with st.spinner("Validating JSON files and merging listening events..."):
             df_events, meta = load_all_streaming_history(extract_dir, json_rel_paths)
 
         if df_events.empty:
+            st.session_state.df_events = None
+            st.session_state.meta = meta
+            st.session_state.merged = False
+
             st.error("No streaming history events found across JSON files.")
             st.write("A few files we skipped (for debugging):")
             st.json(meta["skipped_files"][:10])
             st.stop()
+
+        st.session_state.df_events = df_events
+        st.session_state.meta = meta
+        st.session_state.merged = True
+
+    # Render merged UI if we have results in session_state
+    if st.session_state.merged and st.session_state.df_events is not None:
+        df_events = st.session_state.df_events
+        meta = st.session_state.meta
 
         st.success("Merged listening data!")
 
@@ -372,11 +433,131 @@ with tempfile.TemporaryDirectory() as tmpdir:
         with st.expander("Show streaming files used"):
             st.write(meta["streaming_files_used"])
 
-        st.subheader("Merged dataset preview")
-        st.dataframe(df_events.head(50), use_container_width=True)
+        # =========================================
+        # Eras (dropdown months, no overlaps)
+        # =========================================
+        st.subheader("Define eras of your life")
 
-        st.subheader("Quick sanity checks")
+        current_year = date.today().year
+        years = list(range(2011, current_year + 1))
+        months = list(range(1, 13))
+        month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        month_map = {i + 1: m for i, m in enumerate(month_labels)}
+
+        with st.expander("Add a new era", expanded=True):
+            era_name = st.text_input("Era name", placeholder="e.g., Middle school", key="era_name")
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                start_year = st.selectbox("Start year", years, index=0, key="era_start_year")
+            with c2:
+                start_month = st.selectbox(
+                    "Start month",
+                    months,
+                    format_func=lambda m: month_map[m],
+                    index=8,  # Sep
+                    key="era_start_month",
+                )
+            with c3:
+                end_year = st.selectbox("End year", years, index=min(2, len(years) - 1), key="era_end_year")
+            with c4:
+                end_month = st.selectbox(
+                    "End month",
+                    months,
+                    format_func=lambda m: month_map[m],
+                    index=5,  # Jun
+                    key="era_end_month",
+                )
+
+            add_era = st.button("Add era", key="add_era_btn")
+
+            if add_era:
+                name = era_name.strip()
+                if not name:
+                    st.error("Please enter an era name.")
+                else:
+                    start_ts = month_start_utc(int(start_year), int(start_month))
+                    end_exclusive = next_month_start_utc(int(end_year), int(end_month))
+
+                    if end_exclusive <= start_ts:
+                        st.error("End must be the same as or after the start month.")
+                    else:
+                        overlap_with = None
+                        for e in st.session_state.eras:
+                            e_start = month_start_utc(e["start_year"], e["start_month"])
+                            e_end_excl = next_month_start_utc(e["end_year"], e["end_month"])
+                            if ranges_overlap(start_ts, end_exclusive, e_start, e_end_excl):
+                                overlap_with = e["name"]
+                                break
+
+                        if overlap_with:
+                            st.error(
+                                f"This era overlaps with **{overlap_with}**. "
+                                "Please adjust dates so eras do not overlap."
+                            )
+                        else:
+                            st.session_state.eras.append(
+                                {
+                                    "name": name,
+                                    "start_year": int(start_year),
+                                    "start_month": int(start_month),
+                                    "end_year": int(end_year),
+                                    "end_month": int(end_month),
+                                }
+                            )
+                            st.success(
+                                f"Added era: {name} "
+                                f"({int(start_year)}-{int(start_month):02d} → {int(end_year)}-{int(end_month):02d})"
+                            )
+
+        if st.session_state.eras:
+            eras_df = pd.DataFrame(st.session_state.eras).copy()
+            eras_df["_start"] = eras_df.apply(lambda r: month_start_utc(r["start_year"], r["start_month"]), axis=1)
+            eras_df = eras_df.sort_values("_start").drop(columns=["_start"]).reset_index(drop=True)
+
+            eras_df["start"] = eras_df.apply(lambda r: f"{r['start_year']}-{r['start_month']:02d}", axis=1)
+            eras_df["end"] = eras_df.apply(lambda r: f"{r['end_year']}-{r['end_month']:02d}", axis=1)
+            eras_df = eras_df[["name", "start", "end"]]
+
+            st.write("Your eras:")
+            st.dataframe(eras_df, use_container_width=True)
+
+            col_a, col_b = st.columns([2, 1])
+            with col_a:
+                era_options = ["All time"] + eras_df["name"].tolist()
+                selected_era_name = st.selectbox("Select an era", era_options, key="selected_era")
+            with col_b:
+                if st.button("Clear eras", key="clear_eras_btn"):
+                    st.session_state.eras = []
+                    safe_rerun()
+
+            df_view = df_events
+            if selected_era_name != "All time":
+                era = next(e for e in st.session_state.eras if e["name"] == selected_era_name)
+                df_view = apply_era_filter_month(
+                    df_events,
+                    era["start_year"],
+                    era["start_month"],
+                    era["end_year"],
+                    era["end_month"],
+                )
+                st.info(
+                    f"Filtering to **{selected_era_name}** "
+                    f"({era['start_year']}-{era['start_month']:02d} → {era['end_year']}-{era['end_month']:02d})"
+                )
+
+            st.subheader("Dataset preview (filtered)")
+            st.dataframe(df_view.head(50), use_container_width=True)
+
+            st.subheader("Quick sanity checks (filtered)")
+            st.write(f"Events: **{len(df_view):,}**")
+            st.write(f"Unique tracks: **{df_view['track_name'].nunique(dropna=True):,}**")
+            st.write(f"Unique artists: **{df_view['artist_name'].nunique(dropna=True):,}**")
+            st.write(f"Total minutes played: **{(df_view['ms_played'].sum() / 1000 / 60):,.1f}**")
+        else:
+            st.caption("Add at least one era to enable filtering by era.")
+
+        st.subheader("Quick sanity checks (all time)")
         st.write(f"Unique tracks: **{df_events['track_name'].nunique(dropna=True):,}**")
         st.write(f"Unique artists: **{df_events['artist_name'].nunique(dropna=True):,}**")
         st.write(f"Total minutes played: **{(df_events['ms_played'].sum() / 1000 / 60):,.1f}**")
-
