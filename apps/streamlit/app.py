@@ -215,6 +215,18 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
         )
 
         meta["total_events"] = len(df)
+        
+        # Privacy: drop any IP-related or sensitive network fields if present
+        sensitive_cols = [
+            "ip_addr",
+            "ip_address",
+            "client_ip",
+            "conn_ip",
+            "network_ip",
+        ]
+
+        df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
+
 
         # Enforce canonical schema
         expected_cols = {
@@ -337,6 +349,22 @@ with tempfile.TemporaryDirectory() as tmpdir:
             st.stop()
 
         st.success("Merged listening data!")
+
+        # 🔒 Privacy notice
+        st.info(
+            "🔒 **Privacy notice**: We automatically removed IP addresses and other "
+            "network identifiers from your Spotify data before processing. "
+            "This helps protect your privacy, and no sensitive location or "
+            "network information is stored or displayed."
+        )
+
+        with st.expander("What data was removed?"):
+            st.write(
+                "We removed IP addresses and related network identifiers (such as client "
+                "or connection IP fields). These fields are not required for listening "
+                "insights and are excluded to protect your privacy."
+            )
+
         st.write(f"Streaming history files used: **{len(meta['streaming_files_used'])}**")
         st.write(f"Detected schemas: **A={meta['schemas']['schema_a']}**, **B={meta['schemas']['schema_b']}**")
         st.write(f"Total listening events: **{meta['total_events']:,}**")
@@ -351,3 +379,4 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st.write(f"Unique tracks: **{df_events['track_name'].nunique(dropna=True):,}**")
         st.write(f"Unique artists: **{df_events['artist_name'].nunique(dropna=True):,}**")
         st.write(f"Total minutes played: **{(df_events['ms_played'].sum() / 1000 / 60):,.1f}**")
+
