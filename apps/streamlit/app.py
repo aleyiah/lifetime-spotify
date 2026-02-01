@@ -3,6 +3,7 @@ import os
 import json
 import zipfile
 import tempfile
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Tuple
 from datetime import date, datetime, timezone
@@ -123,6 +124,11 @@ def load_json_safely(path: Path):
         return None, str(e)
 
 
+def zip_hash(data: bytes) -> str:
+    """Stable identifier for the uploaded ZIP bytes."""
+    return hashlib.sha256(data).hexdigest()
+
+
 # =========================
 # Merge / concatenate streaming history
 # =========================
@@ -203,11 +209,8 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
 
     if not df.empty:
         df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
-
-        # Parse + normalize timestamps to UTC
         df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
 
-        # Drop invalid rows, rename canonical timestamp, remove raw ts
         df = (
             df.dropna(subset=["ms_played", "ts_parsed"])
               .rename(columns={"ts_parsed": "ts_utc"})
@@ -218,24 +221,10 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
         meta["total_events"] = len(df)
 
         # Privacy: drop any IP-related or sensitive network fields if present
-        sensitive_cols = [
-            "ip_addr",
-            "ip_address",
-            "client_ip",
-            "conn_ip",
-            "network_ip",
-        ]
+        sensitive_cols = ["ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"]
         df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
 
-        # Enforce canonical schema
-        expected_cols = {
-            "ts_utc",
-            "ms_played",
-            "track_name",
-            "artist_name",
-            "album_name",
-            "source_schema",
-        }
+        expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
         missing = expected_cols - set(df.columns)
         if missing:
             raise ValueError(f"Missing expected columns: {missing}")
@@ -270,11 +259,63 @@ def apply_era_filter_month(df: pd.DataFrame, start_year: int, start_month: int, 
 
 
 def safe_rerun() -> None:
-    # Works across Streamlit versions
     if hasattr(st, "rerun"):
         st.rerun()
     else:
         st.experimental_rerun()
+
+
+# =========================
+# Era persistence (ZIP-scoped)
+# =========================
+
+ERAS_BY_ZIP_FILE = Path(".streamlit/eras_by_zip.json")
+LEGACY_ERAS_FILE = Path(".streamlit/eras.json")  # optional migration from Option 1
+
+
+def _read_json_file(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def load_eras_for_zip(zip_id: str) -> list[dict]:
+    """
+    Returns eras saved for this zip_id.
+    Also performs a one-time migration from legacy .streamlit/eras.json if present.
+    """
+    data = _read_json_file(ERAS_BY_ZIP_FILE)
+    if isinstance(data, dict) and isinstance(data.get(zip_id), list):
+        return data[zip_id]
+
+    # One-time migration: if no eras_by_zip entry yet, but legacy file exists, copy it in.
+    legacy = _read_json_file(LEGACY_ERAS_FILE)
+    if isinstance(legacy, list) and legacy:
+        save_eras_for_zip(zip_id, legacy)
+        return legacy
+
+    return []
+
+
+def save_eras_for_zip(zip_id: str, eras: list[dict]) -> None:
+    ERAS_BY_ZIP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_json_file(ERAS_BY_ZIP_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    data[zip_id] = eras
+    ERAS_BY_ZIP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def clear_eras_for_zip(zip_id: str) -> None:
+    data = _read_json_file(ERAS_BY_ZIP_FILE)
+    if not isinstance(data, dict):
+        return
+    data[zip_id] = []
+    ERAS_BY_ZIP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ERAS_BY_ZIP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 # =========================
@@ -297,6 +338,7 @@ if uploaded is None:
     st.stop()
 
 data = uploaded.getvalue()
+current_zip_id = zip_hash(data)
 
 if not is_zip_bytes(data):
     st.error("That file isn't a valid ZIP. Please upload a .zip export.")
@@ -367,25 +409,32 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st.write(f"Type: **{type(json_obj).__name__}**")
         st.json(json_obj)
 
-    # =====================================================
-    # NEW: Merge all listening data (cached in session state)
-    # =====================================================
+    # =========================================
+    # Merge all listening data (cached)
+    # =========================================
 
     st.subheader("Merge all listening data")
 
-    # Initialize session state containers
     if "df_events" not in st.session_state:
         st.session_state.df_events = None
     if "meta" not in st.session_state:
         st.session_state.meta = None
     if "merged" not in st.session_state:
         st.session_state.merged = False
-    if "eras" not in st.session_state:
-        st.session_state.eras = []
+
+    # Track zip id in session (if upload changes, reload eras and reset merge state)
+    if "zip_id" not in st.session_state or st.session_state.zip_id != current_zip_id:
+        st.session_state.zip_id = current_zip_id
+        st.session_state.eras = load_eras_for_zip(current_zip_id)
+        st.session_state.selected_era = "All time"
+        # If you want to keep merged data when the same zip is re-uploaded, we leave it.
+        # But if the zip changes, clear merge cache:
+        st.session_state.df_events = None
+        st.session_state.meta = None
+        st.session_state.merged = False
 
     merge_now = st.button("Concatenate streaming history files")
 
-    # When clicked, compute once and store results
     if merge_now:
         with st.spinner("Validating JSON files and merging listening events..."):
             df_events, meta = load_all_streaming_history(extract_dir, json_rel_paths)
@@ -404,27 +453,19 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st.session_state.meta = meta
         st.session_state.merged = True
 
-    # Render merged UI if we have results in session_state
     if st.session_state.merged and st.session_state.df_events is not None:
         df_events = st.session_state.df_events
         meta = st.session_state.meta
+        zip_id = st.session_state.zip_id
 
         st.success("Merged listening data!")
 
-        # 🔒 Privacy notice
+        # 🔒 Privacy notice (single)
         st.info(
             "🔒 **Privacy notice**: We automatically removed IP addresses and other "
             "network identifiers from your Spotify data before processing. "
-            "This helps protect your privacy, and no sensitive location or "
-            "network information is stored or displayed."
+            "No sensitive location or network information is stored or displayed."
         )
-
-        with st.expander("What data was removed?"):
-            st.write(
-                "We removed IP addresses and related network identifiers (such as client "
-                "or connection IP fields). These fields are not required for listening "
-                "insights and are excluded to protect your privacy."
-            )
 
         st.write(f"Streaming history files used: **{len(meta['streaming_files_used'])}**")
         st.write(f"Detected schemas: **A={meta['schemas']['schema_a']}**, **B={meta['schemas']['schema_b']}**")
@@ -433,8 +474,52 @@ with tempfile.TemporaryDirectory() as tmpdir:
         with st.expander("Show streaming files used"):
             st.write(meta["streaming_files_used"])
 
+        # -----------------------------
+        # Era selection (ZIP-scoped persisted eras)
+        # -----------------------------
+        eras = st.session_state.eras or []
+        df_view = df_events
+        selected_era_name = "All time"
+
+        if eras:
+            eras_df = pd.DataFrame(eras).copy()
+            eras_df["_start"] = eras_df.apply(lambda r: month_start_utc(r["start_year"], r["start_month"]), axis=1)
+            eras_df = eras_df.sort_values("_start").drop(columns=["_start"]).reset_index(drop=True)
+
+            era_options = ["All time"] + eras_df["name"].tolist()
+            selected_era_name = st.selectbox("Select an era", era_options, key="selected_era")
+
+            if selected_era_name != "All time":
+                era = next(e for e in eras if e["name"] == selected_era_name)
+                df_view = apply_era_filter_month(
+                    df_events,
+                    era["start_year"],
+                    era["start_month"],
+                    era["end_year"],
+                    era["end_month"],
+                )
+                st.caption(
+                    f"Filtering to **{selected_era_name}** "
+                    f"({era['start_year']}-{era['start_month']:02d} → {era['end_year']}-{era['end_month']:02d})"
+                )
+        else:
+            st.caption("No eras saved for this upload yet. You can add eras at the bottom.")
+
+        st.subheader("Dataset preview")
+        st.dataframe(df_view.head(50), use_container_width=True)
+
+        # -----------------------------
+        # Single sanity check (for current view)
+        # -----------------------------
+        st.subheader("Sanity checks")
+        st.write(f"View: **{selected_era_name}**")
+        st.write(f"Events: **{len(df_view):,}**")
+        st.write(f"Unique tracks: **{df_view['track_name'].nunique(dropna=True):,}**")
+        st.write(f"Unique artists: **{df_view['artist_name'].nunique(dropna=True):,}**")
+        st.write(f"Total minutes played: **{(df_view['ms_played'].sum() / 1000 / 60):,.1f}**")
+
         # =========================================
-        # Eras (dropdown months, no overlaps)
+        # Era creation / management (VERY END)
         # =========================================
         st.subheader("Define eras of your life")
 
@@ -443,6 +528,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
         months = list(range(1, 13))
         month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         month_map = {i + 1: m for i, m in enumerate(month_labels)}
+
+        col_a, col_b = st.columns([3, 1])
+        with col_b:
+            if st.button("Clear eras", key="clear_eras_btn"):
+                st.session_state.eras = []
+                clear_eras_for_zip(zip_id)
+                safe_rerun()
 
         with st.expander("Add a new era", expanded=True):
             era_name = st.text_input("Era name", placeholder="e.g., Middle school", key="era_name")
@@ -505,59 +597,20 @@ with tempfile.TemporaryDirectory() as tmpdir:
                                     "end_month": int(end_month),
                                 }
                             )
+                            save_eras_for_zip(zip_id, st.session_state.eras)
                             st.success(
                                 f"Added era: {name} "
                                 f"({int(start_year)}-{int(start_month):02d} → {int(end_year)}-{int(end_month):02d})"
                             )
+                            safe_rerun()
 
         if st.session_state.eras:
             eras_df = pd.DataFrame(st.session_state.eras).copy()
             eras_df["_start"] = eras_df.apply(lambda r: month_start_utc(r["start_year"], r["start_month"]), axis=1)
             eras_df = eras_df.sort_values("_start").drop(columns=["_start"]).reset_index(drop=True)
-
             eras_df["start"] = eras_df.apply(lambda r: f"{r['start_year']}-{r['start_month']:02d}", axis=1)
             eras_df["end"] = eras_df.apply(lambda r: f"{r['end_year']}-{r['end_month']:02d}", axis=1)
             eras_df = eras_df[["name", "start", "end"]]
 
-            st.write("Your eras:")
+            st.caption("Saved eras (scoped to this upload):")
             st.dataframe(eras_df, use_container_width=True)
-
-            col_a, col_b = st.columns([2, 1])
-            with col_a:
-                era_options = ["All time"] + eras_df["name"].tolist()
-                selected_era_name = st.selectbox("Select an era", era_options, key="selected_era")
-            with col_b:
-                if st.button("Clear eras", key="clear_eras_btn"):
-                    st.session_state.eras = []
-                    safe_rerun()
-
-            df_view = df_events
-            if selected_era_name != "All time":
-                era = next(e for e in st.session_state.eras if e["name"] == selected_era_name)
-                df_view = apply_era_filter_month(
-                    df_events,
-                    era["start_year"],
-                    era["start_month"],
-                    era["end_year"],
-                    era["end_month"],
-                )
-                st.info(
-                    f"Filtering to **{selected_era_name}** "
-                    f"({era['start_year']}-{era['start_month']:02d} → {era['end_year']}-{era['end_month']:02d})"
-                )
-
-            st.subheader("Dataset preview (filtered)")
-            st.dataframe(df_view.head(50), use_container_width=True)
-
-            st.subheader("Quick sanity checks (filtered)")
-            st.write(f"Events: **{len(df_view):,}**")
-            st.write(f"Unique tracks: **{df_view['track_name'].nunique(dropna=True):,}**")
-            st.write(f"Unique artists: **{df_view['artist_name'].nunique(dropna=True):,}**")
-            st.write(f"Total minutes played: **{(df_view['ms_played'].sum() / 1000 / 60):,.1f}**")
-        else:
-            st.caption("Add at least one era to enable filtering by era.")
-
-        st.subheader("Quick sanity checks (all time)")
-        st.write(f"Unique tracks: **{df_events['track_name'].nunique(dropna=True):,}**")
-        st.write(f"Unique artists: **{df_events['artist_name'].nunique(dropna=True):,}**")
-        st.write(f"Total minutes played: **{(df_events['ms_played'].sum() / 1000 / 60):,.1f}**")
