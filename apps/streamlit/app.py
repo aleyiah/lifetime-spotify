@@ -74,7 +74,6 @@ def validate_streaming_history_json(json_obj: Any) -> Dict[str, Any]:
             first_event = d
 
     eventish = schema_counts["schema_a"] + schema_counts["schema_b"]
-
     if eventish / len(dict_items) < 0.5:
         result["reason"] = f"Only {eventish}/{len(dict_items)} inspected items look like streaming events."
         return result
@@ -128,7 +127,10 @@ def load_json_safely(path: Path):
 # =========================
 
 def normalize_events(json_obj: Any, schema: str) -> list[dict]:
-    """Convert Schema A or B raw Spotify events into a unified dict format."""
+    """
+    Convert Schema A or B raw Spotify events into a unified column schema.
+    Output columns (pre-clean): ts, ms_played, track_name, artist_name, album_name, source_schema
+    """
     rows: list[dict] = []
 
     if not isinstance(json_obj, list):
@@ -142,9 +144,9 @@ def normalize_events(json_obj: Any, schema: str) -> list[dict]:
                 {
                     "ts": e.get("endTime"),
                     "ms_played": e.get("msPlayed"),
-                    "track": e.get("trackName"),
-                    "artist": e.get("artistName"),
-                    "album": None,
+                    "track_name": e.get("trackName"),
+                    "artist_name": e.get("artistName"),
+                    "album_name": None,
                     "source_schema": "schema_a",
                 }
             )
@@ -157,9 +159,9 @@ def normalize_events(json_obj: Any, schema: str) -> list[dict]:
                 {
                     "ts": e.get("ts"),
                     "ms_played": e.get("ms_played"),
-                    "track": e.get("master_metadata_track_name"),
-                    "artist": e.get("master_metadata_album_artist_name"),
-                    "album": e.get("master_metadata_album_album_name"),
+                    "track_name": e.get("master_metadata_track_name"),
+                    "artist_name": e.get("master_metadata_album_artist_name"),
+                    "album_name": e.get("master_metadata_album_album_name"),
                     "source_schema": "schema_b",
                 }
             )
@@ -198,15 +200,11 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
 
     df = pd.DataFrame(all_rows)
 
-    # ✅ FIX: This block MUST be inside the function
     if not df.empty:
         df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
 
         # Parse + normalize timestamps to UTC
-        if "ts" in df.columns:
-            df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
-        else:
-            df["ts_parsed"] = pd.NaT
+        df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
 
         # Drop invalid rows, rename canonical timestamp, remove raw ts
         df = (
@@ -217,6 +215,19 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> 
         )
 
         meta["total_events"] = len(df)
+
+        # Enforce canonical schema
+        expected_cols = {
+            "ts_utc",
+            "ms_played",
+            "track_name",
+            "artist_name",
+            "album_name",
+            "source_schema",
+        }
+        missing = expected_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing expected columns: {missing}")
 
     return df, meta
 
@@ -337,6 +348,6 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st.dataframe(df_events.head(50), use_container_width=True)
 
         st.subheader("Quick sanity checks")
-        st.write(f"Unique tracks: **{df_events['track'].nunique(dropna=True):,}**")
-        st.write(f"Unique artists: **{df_events['artist'].nunique(dropna=True):,}**")
+        st.write(f"Unique tracks: **{df_events['track_name'].nunique(dropna=True):,}**")
+        st.write(f"Unique artists: **{df_events['artist_name'].nunique(dropna=True):,}**")
         st.write(f"Total minutes played: **{(df_events['ms_played'].sum() / 1000 / 60):,.1f}**")
