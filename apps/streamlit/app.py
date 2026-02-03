@@ -559,9 +559,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
             st.caption("Saved eras (scoped to this upload):")
             st.dataframe(eras_df, use_container_width=True)
 
-            # -----------------------------
-            # Top Artists and Tracks by Era (dropdown selection)
-            # -----------------------------
+            # ====================================
+            # ERA-SPECIFIC STATISTICS
+            # ====================================
+            st.divider()
+            st.header("📊 ERA-SPECIFIC STATISTICS")
             st.subheader("Top Artists and Tracks by Era")
             if st.session_state.df_events is not None:
                 df_events = st.session_state.df_events
@@ -598,10 +600,12 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     st.markdown("**Top 5 Tracks**")
                     st.dataframe(top_tracks_era[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
 
-            # -----------------------------
-            # Top Artists and Tracks of All Time (moved below era definition)
-            # -----------------------------
-            st.subheader("Top Artists and Tracks of All Time")
+            # ====================================
+            # ALL-TIME STATISTICS
+            # ====================================
+            st.divider()
+            st.header("🎵 ALL-TIME STATISTICS")
+            st.subheader("Top Artists and Tracks")
 
             # Top Artists by total playtime
             top_artists = (
@@ -629,10 +633,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
             st.markdown("**Top 10 Tracks by Minutes Played**")
             st.dataframe(top_tracks[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
 
-            # -----------------------------
-            # Bi-Yearly Listening Analysis for Top 10 Artists (moved below era definition)
-            # -----------------------------
-            st.subheader("Bi-Yearly Listening Analysis: Top 10 Artists")
+            st.subheader("Listening Trends: Top 10 Artists Over Time")
             if not top_artists.empty:
                 top10_artists = top_artists["artist_name"].tolist()
                 df_top = df_events[df_events["artist_name"].isin(top10_artists)].copy()
