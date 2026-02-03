@@ -480,37 +480,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         eras = st.session_state.eras or []
         df_view = df_events
         selected_era_name = "All time"
-
-        if eras:
-            eras_df = pd.DataFrame(eras).copy()
-            eras_df["_start"] = eras_df.apply(lambda r: month_start_utc(r["start_year"], r["start_month"]), axis=1)
-            eras_df = eras_df.sort_values("_start").drop(columns=["_start"]).reset_index(drop=True)
-
-            era_options = ["All time"] + eras_df["name"].tolist()
-            selected_era_name = st.selectbox("Select an era", era_options, key="selected_era")
-
-            if selected_era_name != "All time":
-                era = next(e for e in eras if e["name"] == selected_era_name)
-                df_view = apply_era_filter_month(
-                    df_events,
-                    era["start_year"],
-                    era["start_month"],
-                    era["end_year"],
-                    era["end_month"],
-                )
-                st.caption(
-                    f"Filtering to **{selected_era_name}** "
-                    f"({era['start_year']}-{era['start_month']:02d} → {era['end_year']}-{era['end_month']:02d})"
-                )
-        else:
-            st.caption("No eras saved for this upload yet. You can add eras at the bottom.")
-
-        st.subheader("Dataset preview")
-        st.dataframe(df_view.head(50), use_container_width=True)
-
-        # -----------------------------
-        # Single sanity check (for current view)
-        # -----------------------------
+        # ...existing code...
         st.subheader("Sanity checks")
         st.write(f"View: **{selected_era_name}**")
         st.write(f"Events: **{len(df_view):,}**")
@@ -519,7 +489,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st.write(f"Total minutes played: **{(df_view['ms_played'].sum() / 1000 / 60):,.1f}**")
 
         # =========================================
-        # Era creation / management (VERY END)
+        # Era creation / management (NOW IMMEDIATELY AFTER SANITY CHECKS)
         # =========================================
         st.subheader("Define eras of your life")
 
@@ -531,7 +501,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
         col_a, col_b = st.columns([3, 1])
         with col_b:
-            if st.button("Clear eras", key="clear_eras_btn"):
+            if st.button("Clear eras", key="clear_eras_btn_era_section"):
                 st.session_state.eras = []
                 clear_eras_for_zip(zip_id)
                 safe_rerun()
@@ -614,3 +584,177 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
             st.caption("Saved eras (scoped to this upload):")
             st.dataframe(eras_df, use_container_width=True)
+
+            # -----------------------------
+            # Top Artists and Tracks by Era (dropdown selection)
+            # -----------------------------
+            st.subheader("Top Artists and Tracks by Era")
+            if st.session_state.df_events is not None:
+                df_events = st.session_state.df_events
+                era_options = eras_df["name"].tolist()
+                selected_era = st.selectbox("Select an era to view stats:", era_options, key="era_stats_select")
+                era_row = eras_df[eras_df["name"] == selected_era].iloc[0]
+                start_year, start_month = map(int, era_row["start"].split("-"))
+                end_year, end_month = map(int, era_row["end"].split("-"))
+                df_era = apply_era_filter_month(df_events, start_year, start_month, end_year, end_month)
+                st.caption(f"{start_year}-{start_month:02d} → {end_year}-{end_month:02d} | Events: {len(df_era):,}")
+                if df_era.empty:
+                    st.info("No data for this era.")
+                else:
+                    # Top artists
+                    top_artists_era = (
+                        df_era.groupby("artist_name")["ms_played"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .head(5)
+                        .reset_index()
+                    )
+                    top_artists_era["minutes_played"] = (top_artists_era["ms_played"] / 1000 / 60).round(1)
+                    st.markdown("**Top 5 Artists**")
+                    st.dataframe(top_artists_era[["artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
+                    # Top tracks
+                    top_tracks_era = (
+                        df_era.groupby(["track_name", "artist_name"])["ms_played"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .head(5)
+                        .reset_index()
+                    )
+                    top_tracks_era["minutes_played"] = (top_tracks_era["ms_played"] / 1000 / 60).round(1)
+                    st.markdown("**Top 5 Tracks**")
+                    st.dataframe(top_tracks_era[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
+
+            # -----------------------------
+            # Top Artists and Tracks of All Time (moved below era definition)
+            # -----------------------------
+            st.subheader("Top Artists and Tracks of All Time")
+
+            # Top Artists by total playtime
+            top_artists = (
+                df_view.groupby("artist_name")["ms_played"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(10)
+                .reset_index()
+            )
+            top_artists["minutes_played"] = (top_artists["ms_played"] / 1000 / 60).round(1)
+
+            st.markdown("**Top 10 Artists by Minutes Played**")
+            st.dataframe(top_artists[["artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
+
+            # Top Tracks by total playtime
+            top_tracks = (
+                df_view.groupby(["track_name", "artist_name"])["ms_played"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(10)
+                .reset_index()
+            )
+            top_tracks["minutes_played"] = (top_tracks["ms_played"] / 1000 / 60).round(1)
+
+            st.markdown("**Top 10 Tracks by Minutes Played**")
+            st.dataframe(top_tracks[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
+
+            # -----------------------------
+            # Bi-Yearly Listening Analysis for Top 10 Artists (moved below era definition)
+            # -----------------------------
+            st.subheader("Bi-Yearly Listening Analysis: Top 10 Artists")
+            if not top_artists.empty:
+                top10_artists = top_artists["artist_name"].tolist()
+                df_top = df_events[df_events["artist_name"].isin(top10_artists)].copy()
+                # Create bi-yearly period column
+                df_top["year"] = df_top["ts_utc"].dt.year
+                df_top["month"] = df_top["ts_utc"].dt.month
+                df_top["half"] = df_top["month"].apply(lambda m: 1 if m <= 6 else 2)
+                df_top["bi_yearly"] = df_top["year"].astype(str) + " H" + df_top["half"].astype(str)
+
+                # Pivot table: rows=artist, columns=bi-yearly, values=minutes played
+                pivot = pd.pivot_table(
+                    df_top,
+                    index="artist_name",
+                    columns="bi_yearly",
+                    values="ms_played",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                # Convert ms_played to minutes
+                pivot = (pivot / 1000 / 60).round(1)
+                # Add total column for sorting
+                pivot["Total"] = pivot.sum(axis=1)
+                pivot = pivot.sort_values("Total", ascending=False).drop(columns=["Total"])
+
+                st.markdown(
+                    "This line graph shows the minutes played for each top artist in every half-year period. "
+                    "You can see when artists appear, peak, or drop off in your listening history."
+                )
+                # Prepare long-form DataFrame for plotting
+                pivot_reset = pivot.reset_index()
+                pivot_melt = pivot_reset.melt(id_vars="artist_name", var_name="bi_yearly", value_name="minutes_played")
+                # Sort bi_yearly periods chronologically
+                period_order = sorted(pivot.columns, key=lambda x: (int(x.split()[0]), int(x.split()[1][1:])) if x != "Total" else (9999, 0))
+                pivot_melt = pivot_melt[pivot_melt["bi_yearly"].isin(period_order)]
+                pivot_melt["bi_yearly"] = pd.Categorical(pivot_melt["bi_yearly"], categories=period_order, ordered=True)
+                pivot_melt = pivot_melt.sort_values(["artist_name", "bi_yearly"])
+
+                import altair as alt
+                # Interactive selection for artist
+                selection = alt.selection_single(fields=["artist_name"], bind="legend", name="Select")
+                chart = alt.Chart(pivot_melt).mark_line(point=True).encode(
+                    x=alt.X("bi_yearly:N", title="Half-Year Period"),
+                    y=alt.Y("minutes_played:Q", title="Minutes Played"),
+                    color=alt.Color("artist_name:N", title="Artist"),
+                    opacity=alt.condition(selection, alt.value(1), alt.value(0.15)),
+                    tooltip=["artist_name", "bi_yearly", "minutes_played"]
+                ).add_selection(
+                    selection
+                ).properties(
+                    width=800,
+                    height=400
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+                # Show top album and track for selected artist and each bi-yearly period
+                artist_options = ["(None)"] + top10_artists
+                artist_choice = st.selectbox("Highlight artist for details:", artist_options, index=0, key="selected_artist_for_biyearly")
+                if artist_choice and artist_choice != "(None)":
+                    df_artist = df_top[df_top["artist_name"] == artist_choice].copy()
+                    if not df_artist.empty:
+                        st.markdown(f"#### Top Album and Track for {artist_choice} by Half-Year")
+                        try:
+                            periods = sorted(df_artist["bi_yearly"].unique(), key=lambda x: (int(x.split()[0]), int(x.split()[1][1:])))
+                        except Exception:
+                            periods = []
+                        rows = []
+                        for period in periods:
+                            df_period = df_artist[df_artist["bi_yearly"] == period]
+                            # Top album
+                            if "album_name" in df_period.columns and not df_period["album_name"].isnull().all():
+                                top_album = (
+                                    df_period.groupby("album_name")["ms_played"].sum().sort_values(ascending=False).head(1)
+                                )
+                                album_name = top_album.index[0] if not top_album.empty else None
+                                album_minutes = (top_album.iloc[0] / 1000 / 60) if not top_album.empty else 0
+                            else:
+                                album_name = None
+                                album_minutes = 0
+                            # Top track
+                            top_track = (
+                                df_period.groupby("track_name")["ms_played"].sum().sort_values(ascending=False).head(1)
+                            )
+                            track_name = top_track.index[0] if not top_track.empty else None
+                            track_minutes = (top_track.iloc[0] / 1000 / 60) if not top_track.empty else 0
+                            rows.append({
+                                "Half-Year": period,
+                                "Top Album": album_name,
+                                "Album Minutes": round(album_minutes, 1),
+                                "Top Track": track_name,
+                                "Track Minutes": round(track_minutes, 1),
+                            })
+                        if rows:
+                            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No data for this artist in any half-year period.")
+                    else:
+                        st.info("No data for this artist.")
+                else:
+                    st.info("Select an artist to see top album and track details.")
