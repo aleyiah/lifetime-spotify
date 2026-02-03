@@ -465,14 +465,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         # =========================================
         # Era creation / management (NOW IMMEDIATELY AFTER SANITY CHECKS)
         # =========================================
-        col_header, col_btn = st.columns([3, 1])
-        with col_header:
-            st.subheader("Define eras of your life")
-        with col_btn:
-            if st.button("Clear eras", key="clear_eras_btn_era_section"):
-                st.session_state.eras = []
-                clear_eras_for_zip(zip_id)
-                safe_rerun()
+        st.subheader("Define eras of your life")
 
         current_year = date.today().year
         years = list(range(2011, current_year + 1))
@@ -557,6 +550,12 @@ with tempfile.TemporaryDirectory() as tmpdir:
             eras_df = eras_df[["name", "start", "end"]]
 
             st.caption("Saved eras (scoped to this upload):")
+            col_title, col_clear = st.columns([3, 1])
+            with col_clear:
+                if st.button("Clear eras", key="clear_eras_btn_era_section"):
+                    st.session_state.eras = []
+                    clear_eras_for_zip(zip_id)
+                    safe_rerun()
             st.dataframe(eras_df, use_container_width=True)
 
             # ====================================
