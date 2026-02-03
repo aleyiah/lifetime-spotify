@@ -556,7 +556,19 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     st.session_state.eras = []
                     clear_eras_for_zip(zip_id)
                     safe_rerun()
-            st.dataframe(eras_df, use_container_width=True)
+            
+            # Display eras with individual delete buttons
+            for idx, era in enumerate(st.session_state.eras):
+                col1, col2, col3 = st.columns([2, 2, 1])
+                with col1:
+                    st.text(era["name"])
+                with col2:
+                    st.caption(f"{era['start_year']}-{era['start_month']:02d} → {era['end_year']}-{era['end_month']:02d}")
+                with col3:
+                    if st.button("Delete", key=f"delete_era_{idx}"):
+                        st.session_state.eras.pop(idx)
+                        clear_eras_for_zip(zip_id)
+                        safe_rerun()
 
             # ====================================
             # ERA-SPECIFIC STATISTICS
