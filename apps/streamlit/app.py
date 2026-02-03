@@ -176,67 +176,62 @@ def normalize_events(json_obj: Any, schema: str) -> list[dict]:
     return rows
 
 def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str], zip_hash_id: str = None) -> tuple[pd.DataFrame, dict]:
-    """Validate, load, normalize, and concatenate streaming history across all JSON files."""
-    @st.cache_data
-    def _load_cached(zip_hash_id: str, json_paths_str: str) -> tuple[pd.DataFrame, dict]:
-        """Inner cached function keyed by ZIP hash."""
-        meta = {
-            "streaming_files_used": [],
-            "skipped_files": [],
-            "total_events": 0,
-            "schemas": {"schema_a": 0, "schema_b": 0},
-        }
-
-        all_rows: list[dict] = []
-
-        for rel in json_rel_paths:
-            path = extract_dir / rel
-            json_obj, err = load_json_safely(path)
-            if err:
-                meta["skipped_files"].append({"file": rel, "reason": f"json parse error: {err}"})
-                continue
-
-            validation = validate_streaming_history_json(json_obj)
-            if not validation["is_streaming_history"]:
-                meta["skipped_files"].append({"file": rel, "reason": validation["reason"]})
-                continue
-
-            schema = validation["schema"]
-            meta["schemas"][schema] += 1
-            meta["streaming_files_used"].append(rel)
-
-            all_rows.extend(normalize_events(json_obj, schema))
-
-        df = pd.DataFrame(all_rows)
-
-        if not df.empty:
-            df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
-            df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
-
-            df = (
-                df.dropna(subset=["ms_played", "ts_parsed"])
-                  .rename(columns={"ts_parsed": "ts_utc"})
-                  .drop(columns=["ts"], errors="ignore")
-                  .reset_index(drop=True)
-            )
-
-            meta["total_events"] = len(df)
-
-            sensitive_cols = ["ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"]
-            df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
-
-            expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
-            missing = expected_cols - set(df.columns)
-            if missing:
-                raise ValueError(f"Missing expected columns: {missing}")
-
-        return df, meta
+    """Validate, load, normalize, and concatenate streaming history across all JSON files.
     
-    # Call cached function with ZIP hash as key
-    if zip_hash_id is None:
-        zip_hash_id = "no_hash"
-    json_paths_str = "|".join(json_rel_paths)
-    return _load_cached(zip_hash_id, json_paths_str)
+    Note: Not cached globally. Results are stored in st.session_state only.
+    This avoids keeping large dataframes in memory across sessions.
+    """
+    meta = {
+        "streaming_files_used": [],
+        "skipped_files": [],
+        "total_events": 0,
+        "schemas": {"schema_a": 0, "schema_b": 0},
+    }
+
+    all_rows: list[dict] = []
+
+    for rel in json_rel_paths:
+        path = extract_dir / rel
+        json_obj, err = load_json_safely(path)
+        if err:
+            meta["skipped_files"].append({"file": rel, "reason": f"json parse error: {err}"})
+            continue
+
+        validation = validate_streaming_history_json(json_obj)
+        if not validation["is_streaming_history"]:
+            meta["skipped_files"].append({"file": rel, "reason": validation["reason"]})
+            continue
+
+        schema = validation["schema"]
+        meta["schemas"][schema] += 1
+        meta["streaming_files_used"].append(rel)
+
+        all_rows.extend(normalize_events(json_obj, schema))
+
+    df = pd.DataFrame(all_rows)
+
+    if not df.empty:
+        df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
+        df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+
+        df = (
+            df.dropna(subset=["ms_played", "ts_parsed"])
+              .rename(columns={"ts_parsed": "ts_utc"})
+              .drop(columns=["ts"], errors="ignore")
+              .reset_index(drop=True)
+        )
+
+        meta["total_events"] = len(df)
+
+        sensitive_cols = ["ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"]
+        df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
+
+        expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
+        missing = expected_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing expected columns: {missing}")
+
+    return df, meta
 
 
 # =========================
@@ -419,7 +414,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     if merge_now:
         with st.spinner("Loading and merging streaming history..."):
-            df_events, meta = load_all_streaming_history(extract_dir, json_rel_paths, current_zip_id)
+            df_events, meta = load_all_streaming_history(extract_dir, json_rel_paths)
 
         if df_events.empty:
             st.session_state.df_events = None
