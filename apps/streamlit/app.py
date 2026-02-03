@@ -175,61 +175,68 @@ def normalize_events(json_obj: Any, schema: str) -> list[dict]:
 
     return rows
 
-
-def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str]) -> tuple[pd.DataFrame, dict]:
+def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str], zip_hash_id: str = None) -> tuple[pd.DataFrame, dict]:
     """Validate, load, normalize, and concatenate streaming history across all JSON files."""
-    meta = {
-        "streaming_files_used": [],
-        "skipped_files": [],
-        "total_events": 0,
-        "schemas": {"schema_a": 0, "schema_b": 0},
-    }
+    @st.cache_data
+    def _load_cached(zip_hash_id: str, json_paths_str: str) -> tuple[pd.DataFrame, dict]:
+        """Inner cached function keyed by ZIP hash."""
+        meta = {
+            "streaming_files_used": [],
+            "skipped_files": [],
+            "total_events": 0,
+            "schemas": {"schema_a": 0, "schema_b": 0},
+        }
 
-    all_rows: list[dict] = []
+        all_rows: list[dict] = []
 
-    for rel in json_rel_paths:
-        path = extract_dir / rel
-        json_obj, err = load_json_safely(path)
-        if err:
-            meta["skipped_files"].append({"file": rel, "reason": f"json parse error: {err}"})
-            continue
+        for rel in json_rel_paths:
+            path = extract_dir / rel
+            json_obj, err = load_json_safely(path)
+            if err:
+                meta["skipped_files"].append({"file": rel, "reason": f"json parse error: {err}"})
+                continue
 
-        validation = validate_streaming_history_json(json_obj)
-        if not validation["is_streaming_history"]:
-            meta["skipped_files"].append({"file": rel, "reason": validation["reason"]})
-            continue
+            validation = validate_streaming_history_json(json_obj)
+            if not validation["is_streaming_history"]:
+                meta["skipped_files"].append({"file": rel, "reason": validation["reason"]})
+                continue
 
-        schema = validation["schema"]
-        meta["schemas"][schema] += 1
-        meta["streaming_files_used"].append(rel)
+            schema = validation["schema"]
+            meta["schemas"][schema] += 1
+            meta["streaming_files_used"].append(rel)
 
-        all_rows.extend(normalize_events(json_obj, schema))
+            all_rows.extend(normalize_events(json_obj, schema))
 
-    df = pd.DataFrame(all_rows)
+        df = pd.DataFrame(all_rows)
 
-    if not df.empty:
-        df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
-        df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+        if not df.empty:
+            df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
+            df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
 
-        df = (
-            df.dropna(subset=["ms_played", "ts_parsed"])
-              .rename(columns={"ts_parsed": "ts_utc"})
-              .drop(columns=["ts"], errors="ignore")
-              .reset_index(drop=True)
-        )
+            df = (
+                df.dropna(subset=["ms_played", "ts_parsed"])
+                  .rename(columns={"ts_parsed": "ts_utc"})
+                  .drop(columns=["ts"], errors="ignore")
+                  .reset_index(drop=True)
+            )
 
-        meta["total_events"] = len(df)
+            meta["total_events"] = len(df)
 
-        # Privacy: drop any IP-related or sensitive network fields if present
-        sensitive_cols = ["ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"]
-        df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
+            sensitive_cols = ["ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"]
+            df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
 
-        expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
-        missing = expected_cols - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing expected columns: {missing}")
+            expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
+            missing = expected_cols - set(df.columns)
+            if missing:
+                raise ValueError(f"Missing expected columns: {missing}")
 
-    return df, meta
+        return df, meta
+    
+    # Call cached function with ZIP hash as key
+    if zip_hash_id is None:
+        zip_hash_id = "no_hash"
+    json_paths_str = "|".join(json_rel_paths)
+    return _load_cached(zip_hash_id, json_paths_str)
 
 
 # =========================
@@ -366,48 +373,23 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     json_rel_paths = find_json_files(str(extract_dir))
 
-    st.subheader("JSON files found")
     if not json_rel_paths:
-        st.warning("No JSON files found in the ZIP. Make sure you uploaded the Spotify data export ZIP.")
+        st.error("❌ No JSON files found in the ZIP. Make sure you uploaded the Spotify data export ZIP.")
         st.stop()
 
-    st.write(f"Found **{len(json_rel_paths)}** JSON file(s). Non-JSON files are ignored.")
-
-    with st.expander("Show JSON file list"):
-        st.write(json_rel_paths)
-
-    selected_rel = st.selectbox("Preview a JSON file", json_rel_paths)
-    selected_path = extract_dir / selected_rel
-
-    json_obj, err = load_json_safely(selected_path)
-    if err:
-        st.error(f"Couldn't parse JSON: {selected_rel}\n\n{err}")
+    # Quick validation check on first JSON file
+    first_json_path = extract_dir / json_rel_paths[0]
+    first_json_obj, err = load_json_safely(first_json_path)
+    if err or not first_json_obj:
+        st.error("❌ Could not parse JSON files. Please check your export.")
         st.stop()
-
-    validation = validate_streaming_history_json(json_obj)
-
-    st.subheader("Streaming History Validation")
-    if validation["is_streaming_history"]:
-        st.success(validation["reason"])
-        st.write(f"Events in file: **{validation['events_found']}**")
-        st.write(f"Detected schema: **{validation['schema']}**")
-        st.caption("Sample event (first validated event):")
-        st.json(validation["sample_event"])
-    else:
-        st.error("This JSON does not look like Spotify streaming history.")
-        st.write(validation["reason"])
-        st.caption("Tip: choose another JSON file—many Spotify export files aren't listening events.")
-
-    st.subheader("Preview")
-    if isinstance(json_obj, list):
-        st.write(f"Type: **list**  |  Length: **{len(json_obj)}**")
-        st.json(json_obj[:2])
-    elif isinstance(json_obj, dict):
-        st.write(f"Type: **dict**  |  Keys: **{len(json_obj)}**")
-        st.json(dict(list(json_obj.items())[:10]))
-    else:
-        st.write(f"Type: **{type(json_obj).__name__}**")
-        st.json(json_obj)
+    
+    validation = validate_streaming_history_json(first_json_obj)
+    if not validation["is_streaming_history"]:
+        st.error("❌ JSON files do not appear to be Spotify streaming history.")
+        st.stop()
+    
+    st.success(f"✅ Found and validated {len(json_rel_paths)} streaming history file(s)")
 
     # =========================================
     # Merge all listening data (cached)
@@ -436,17 +418,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
     merge_now = st.button("Concatenate streaming history files")
 
     if merge_now:
-        with st.spinner("Validating JSON files and merging listening events..."):
-            df_events, meta = load_all_streaming_history(extract_dir, json_rel_paths)
+        with st.spinner("Loading and merging streaming history..."):
+            df_events, meta = load_all_streaming_history(extract_dir, json_rel_paths, current_zip_id)
 
         if df_events.empty:
             st.session_state.df_events = None
             st.session_state.meta = meta
             st.session_state.merged = False
-
-            st.error("No streaming history events found across JSON files.")
-            st.write("A few files we skipped (for debugging):")
-            st.json(meta["skipped_files"][:10])
+            st.error("❌ No streaming history events found. Check your data export.")
             st.stop()
 
         st.session_state.df_events = df_events
@@ -467,12 +446,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
             "No sensitive location or network information is stored or displayed."
         )
 
-        st.write(f"Streaming history files used: **{len(meta['streaming_files_used'])}**")
-        st.write(f"Detected schemas: **A={meta['schemas']['schema_a']}**, **B={meta['schemas']['schema_b']}**")
-        st.write(f"Total listening events: **{meta['total_events']:,}**")
-
-        with st.expander("Show streaming files used"):
-            st.write(meta["streaming_files_used"])
+        st.write(f"✅ Merged {len(meta['streaming_files_used'])} file(s) with **{meta['total_events']:,}** events")
 
         # -----------------------------
         # Era selection (ZIP-scoped persisted eras)
