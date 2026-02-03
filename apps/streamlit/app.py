@@ -733,4 +733,4 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     else:
                         st.info("No data for this artist.")
                 else:
-                    st.info("Select an artist to see top album and track details.")
+                    st.info("💡 Select an artist to see top album and track details.")
