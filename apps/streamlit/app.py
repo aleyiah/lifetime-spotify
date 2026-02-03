@@ -569,6 +569,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 df_events = st.session_state.df_events
                 era_options = eras_df["name"].tolist()
                 selected_era = st.selectbox("Select an era to view stats:", era_options, key="era_stats_select")
+                st.info("💡 Choose an era from the dropdown above to explore your listening patterns during that time period.")
                 era_row = eras_df[eras_df["name"] == selected_era].iloc[0]
                 start_year, start_month = map(int, era_row["start"].split("-"))
                 end_year, end_month = map(int, era_row["end"].split("-"))
