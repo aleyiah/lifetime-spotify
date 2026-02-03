@@ -465,20 +465,20 @@ with tempfile.TemporaryDirectory() as tmpdir:
         # =========================================
         # Era creation / management (NOW IMMEDIATELY AFTER SANITY CHECKS)
         # =========================================
-        st.subheader("Define eras of your life")
+        col_header, col_btn = st.columns([3, 1])
+        with col_header:
+            st.subheader("Define eras of your life")
+        with col_btn:
+            if st.button("Clear eras", key="clear_eras_btn_era_section"):
+                st.session_state.eras = []
+                clear_eras_for_zip(zip_id)
+                safe_rerun()
 
         current_year = date.today().year
         years = list(range(2011, current_year + 1))
         months = list(range(1, 13))
         month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         month_map = {i + 1: m for i, m in enumerate(month_labels)}
-
-        col_a, col_b = st.columns([3, 1])
-        with col_b:
-            if st.button("Clear eras", key="clear_eras_btn_era_section"):
-                st.session_state.eras = []
-                clear_eras_for_zip(zip_id)
-                safe_rerun()
 
         with st.expander("Add a new era", expanded=True):
             era_name = st.text_input("Era name", placeholder="e.g., Middle school", key="era_name")
