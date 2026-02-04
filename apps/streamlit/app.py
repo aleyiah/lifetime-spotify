@@ -457,12 +457,21 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
         st.write(f"✅ Merged {len(meta['streaming_files_used'])} file(s) with **{meta['total_events']:,}** events")
 
+        # Show sanity checks (not era-specific)
+        st.subheader("Sanity checks")
+        st.write(f"Events: **{len(df_events):,}**")
+        st.write(f"Unique tracks: **{df_events['track_name'].nunique(dropna=True):,}**")
+        st.write(f"Unique artists: **{df_events['artist_name'].nunique(dropna=True):,}**")
+        st.write(f"Total minutes played: **{(df_events['ms_played'].sum() / 1000 / 60):,.1f}**")
+
+        st.divider()
+
         # Initialize slide state
         if "current_slide" not in st.session_state:
             st.session_state.current_slide = 0
 
-        # Slides: 0=Era Management, 1=Era-Specific Stats, 2=All-Time Stats, 3=Listening Trends, 4=First Listen
-        SLIDES = ["Define Eras", "Era-Specific Stats", "All-Time Stats", "Listening Trends", "First Listen"]
+        # Slides: 0=Define Eras, 1=Statistics, 2=Listening Trends, 3=First Listen
+        SLIDES = ["Define Eras", "Statistics", "Listening Trends", "First Listen"]
         
         # Display slide counter and navigation
         col_nav1, col_nav2, col_nav3 = st.columns([1, 3, 1])
@@ -488,12 +497,6 @@ with tempfile.TemporaryDirectory() as tmpdir:
         # SLIDE 0: ERA MANAGEMENT
         # =========================================
         if st.session_state.current_slide == 0:
-            st.subheader("Sanity checks")
-            st.write(f"Events: **{len(df_events):,}**")
-            st.write(f"Unique tracks: **{df_events['track_name'].nunique(dropna=True):,}**")
-            st.write(f"Unique artists: **{df_events['artist_name'].nunique(dropna=True):,}**")
-            st.write(f"Total minutes played: **{(df_events['ms_played'].sum() / 1000 / 60):,.1f}**")
-
             st.subheader("Define eras of your life")
 
             current_year = date.today().year
@@ -507,23 +510,21 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    start_year = st.selectbox("Start year", years, index=0, key="era_start_year")
+                    start_year = st.selectbox("Start year", years, key="era_start_year")
                 with c2:
                     start_month = st.selectbox(
                         "Start month",
                         months,
                         format_func=lambda m: month_map[m],
-                        index=8,  # Sep
                         key="era_start_month",
                     )
                 with c3:
-                    end_year = st.selectbox("End year", years, index=min(2, len(years) - 1), key="era_end_year")
+                    end_year = st.selectbox("End year", years, key="era_end_year")
                 with c4:
                     end_month = st.selectbox(
                         "End month",
                         months,
                         format_func=lambda m: month_map[m],
-                        index=11,  # Dec
                         key="era_end_month",
                     )
 
@@ -600,7 +601,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 eras_df = eras_df.sort_values("_start").drop(columns=["_start"]).reset_index(drop=True)
                 
                 era_options = ["All time"] + eras_df["name"].tolist()
-                selected_era = st.selectbox("Select era:", era_options, index=0, key="era_selector")
+                selected_era = st.selectbox("Select era:", era_options, key="era_selector")
                 
                 if selected_era != "All time":
                     era_row = eras_df[eras_df["name"] == selected_era].iloc[0]
@@ -610,46 +611,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     selected_era_name = selected_era
 
             # =========================================
-            # SLIDE 1: ERA-SPECIFIC STATS
+            # SLIDE 1: STATISTICS
             # =========================================
             if st.session_state.current_slide == 1:
-                st.subheader(f"Statistics for {selected_era_name}")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Events", f"{len(df_view):,}")
-                with col2:
-                    st.metric("Unique Artists", f"{df_view['artist_name'].nunique(dropna=True):,}")
-                with col3:
-                    st.metric("Total Minutes", f"{(df_view['ms_played'].sum() / 1000 / 60):,.1f}")
-
-                st.subheader("Top Artists")
-                top_artists_era = (
-                    df_view.groupby("artist_name")["ms_played"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(5)
-                    .reset_index()
-                )
-                top_artists_era["minutes_played"] = (top_artists_era["ms_played"] / 1000 / 60).round(1)
-                st.dataframe(top_artists_era[["artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
-
-                st.subheader("Top Tracks")
-                top_tracks_era = (
-                    df_view.groupby(["track_name", "artist_name"])["ms_played"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(5)
-                    .reset_index()
-                )
-                top_tracks_era["minutes_played"] = (top_tracks_era["ms_played"] / 1000 / 60).round(1)
-                st.dataframe(top_tracks_era[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
-
-            # =========================================
-            # SLIDE 2: ALL-TIME STATISTICS
-            # =========================================
-            elif st.session_state.current_slide == 2:
-                st.header("🎵 ALL-TIME STATISTICS")
+                st.header("📊 Top Artists and Tracks by Era")
 
                 # Top Artists by total playtime
                 top_artists = (
@@ -678,9 +643,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 st.dataframe(top_tracks[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
 
             # =========================================
-            # SLIDE 3: LISTENING TRENDS
+            # SLIDE 2: LISTENING TRENDS
             # =========================================
-            elif st.session_state.current_slide == 3:
+            elif st.session_state.current_slide == 2:
                 st.subheader("Listening Trends: Top 10 Artists Over Time")
                 
                 top_artists = (
@@ -747,7 +712,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
                     # Show top album and track for selected artist and each bi-yearly period
                     artist_options = ["(None)"] + top10_artists
-                    artist_choice = st.selectbox("Highlight artist for details:", artist_options, index=0, key="selected_artist_for_biyearly")
+                    artist_choice = st.selectbox("Highlight artist for details:", artist_options, key="selected_artist_for_biyearly")
                     if artist_choice and artist_choice != "(None)":
                         df_artist = df_top[df_top["artist_name"] == artist_choice].copy()
                         if not df_artist.empty:
@@ -792,9 +757,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
                         st.info("💡 Select an artist to see top album and track details.")
 
             # =========================================
-            # SLIDE 4: FIRST LISTEN
+            # SLIDE 3: FIRST LISTEN
             # =========================================
-            elif st.session_state.current_slide == 4:
+            elif st.session_state.current_slide == 3:
                 st.subheader("🎤 When Did You First Listen to These Artists?")
 
                 # Get top 25 artists by total playtime
@@ -811,12 +776,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 artists_by_first_listen = []
                 
                 for artist in top_25_artists["artist_name"]:
-                    artist_listens = df_view[df_view["artist_name"] == artist]
-                    first_listen = artist_listens["ts_utc"].min()
-                    total_minutes = (artist_listens["ms_played"].sum() / 1000 / 60)
+                    # Get total minutes from the era view (df_view)
+                    artist_listens_era = df_view[df_view["artist_name"] == artist]
+                    total_minutes = (artist_listens_era["ms_played"].sum() / 1000 / 60)
                     
-                    # Find when they started listening regularly (first day with 8+ plays)
-                    daily_plays = artist_listens.groupby(artist_listens["ts_utc"].dt.date).size()
+                    # Get first listen and regular listening from ENTIRE history (df_events)
+                    artist_listens_full = df_events[df_events["artist_name"] == artist]
+                    first_listen = artist_listens_full["ts_utc"].min()
+                    
+                    # Find when they started listening regularly (first day with 8+ plays) - from full history
+                    daily_plays = artist_listens_full.groupby(artist_listens_full["ts_utc"].dt.date).size()
                     regular_listening_date = None
                     for date, play_count in daily_plays.items():
                         if play_count >= 8:
@@ -852,7 +821,6 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 selected_artist = st.selectbox(
                     "Choose an artist from your top 25:",
                     sorted_artists,
-                    index=0,
                     key="first_listen_artist_selector"
                 )
 
