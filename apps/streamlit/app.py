@@ -254,6 +254,20 @@ def ranges_overlap(a_start: pd.Timestamp, a_end_excl: pd.Timestamp,
     return (a_start < b_end_excl) and (b_start < a_end_excl)
 
 
+def get_era_for_timestamp(ts: pd.Timestamp, eras: list[dict]) -> str:
+    """Find which era a timestamp falls into. Returns era name or 'Pre-era' if no match."""
+    if pd.isna(ts) or not eras:
+        return "Pre-era"
+    
+    for era in eras:
+        era_start = month_start_utc(era["start_year"], era["start_month"])
+        era_end = next_month_start_utc(era["end_year"], era["end_month"])
+        if era_start <= ts < era_end:
+            return era["name"]
+    
+    return "Pre-era"
+
+
 def apply_era_filter_month(df: pd.DataFrame, start_year: int, start_month: int, end_year: int, end_month: int) -> pd.DataFrame:
     start_ts = month_start_utc(start_year, start_month)
     end_exclusive = next_month_start_utc(end_year, end_month)
@@ -740,3 +754,91 @@ with tempfile.TemporaryDirectory() as tmpdir:
                         st.info("No data for this artist.")
                 else:
                     st.info("💡 Select an artist to see top album and track details.")
+
+            # ====================================
+            # FIRST LISTEN DATE FOR TOP ARTISTS
+            # ====================================
+            st.divider()
+            st.subheader("🎤 When Did You First Listen to These Artists?")
+
+            # Get top 25 artists by total playtime
+            top_25_artists = (
+                df_view.groupby("artist_name")["ms_played"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(25)
+                .reset_index()
+            )
+
+            # Create a mapping of artist info
+            first_listen_data = {}
+            artists_by_first_listen = []
+            eras = st.session_state.eras or []
+            
+            for artist in top_25_artists["artist_name"]:
+                artist_listens = df_view[df_view["artist_name"] == artist]
+                first_listen = artist_listens["ts_utc"].min()
+                total_minutes = (artist_listens["ms_played"].sum() / 1000 / 60)
+                
+                # Find when they started listening regularly (first day with 8+ plays)
+                daily_plays = artist_listens.groupby(artist_listens["ts_utc"].dt.date).size()
+                regular_listening_date = None
+                for date, play_count in daily_plays.items():
+                    if play_count >= 8:
+                        regular_listening_date = pd.Timestamp(date, tz=timezone.utc)
+                        break
+                
+                # Calculate days until regular listening
+                days_to_regular = None
+                if pd.notna(first_listen) and pd.notna(regular_listening_date):
+                    days_to_regular = (regular_listening_date - first_listen).days
+                
+                # Get the era for first listen
+                first_listen_era = get_era_for_timestamp(first_listen, eras)
+                
+                first_listen_data[artist] = {
+                    "First Listen": first_listen.strftime("%B %d, %Y") if pd.notna(first_listen) else "Unknown",
+                    "First Listen Date": first_listen,
+                    "First Listen Era": first_listen_era,
+                    "Regular Listening": regular_listening_date.strftime("%B %d, %Y") if pd.notna(regular_listening_date) else "Never",
+                    "Regular Listening Date": regular_listening_date,
+                    "Days to Regular": days_to_regular,
+                    "Total Minutes": round(total_minutes, 1),
+                }
+                artists_by_first_listen.append((artist, total_minutes))
+            
+            # Sort by total minutes played (most to least)
+            artists_by_first_listen.sort(key=lambda x: x[1], reverse=True)
+            sorted_artists = [artist for artist, _ in artists_by_first_listen]
+
+            st.info("💡 Select an artist to discover the first day you listened to them!")
+
+            # Dropdown to select artist
+            selected_artist = st.selectbox(
+                "Choose an artist from your top 25:",
+                sorted_artists,
+                index=0,
+                key="first_listen_artist_selector"
+            )
+
+            if selected_artist:
+                info = first_listen_data[selected_artist]
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("First Listen", info["First Listen"])
+                    st.caption(f"Era: {info['First Listen Era']}")
+                with col2:
+                    st.metric("Started Regular Listening", info["Regular Listening"])
+                
+                col3, col4, col5 = st.columns(3)
+                with col3:
+                    if info["Days to Regular"] is not None:
+                        st.metric("Days to Big Fan", f"{info['Days to Regular']} days")
+                    else:
+                        st.metric("Days to Big Fan", "N/A")
+                with col4:
+                    st.metric("Total Minutes", f"{info['Total Minutes']:,.1f}")
+                
+                st.markdown(
+                    "💡 This shows when you first discovered this artist and when you became a regular listener (8+ plays in a day)!"
+                )
