@@ -834,6 +834,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 with col3:
                     if info["Days to Regular"] is not None:
                         st.metric("Days to Big Fan", f"{info['Days to Regular']} days")
+                        # Show message based on days to regular
+                        days = info["Days to Regular"]
+                        if days == -1:
+                            st.caption("Instant fan! 🔥")
+                        elif 0 <= days <= 60:
+                            st.caption("You liked them right away! ⚡")
+                        elif 60 < days <= 365:
+                            st.caption("Took less than a year to reel you in 🎣")
+                        elif days > 365:
+                            st.caption("Bit of a slow burn 🔥‍🧊")
                     else:
                         st.metric("Days to Big Fan", "N/A")
                 with col4:
