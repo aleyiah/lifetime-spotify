@@ -800,10 +800,18 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     # Get the era for first listen
                     first_listen_era = get_era_for_timestamp(first_listen, eras)
                     
+                    # Get the first track they listened to by this artist
+                    first_track = None
+                    if pd.notna(first_listen):
+                        first_listen_records = artist_listens_full[artist_listens_full["ts_utc"] == first_listen]
+                        if not first_listen_records.empty:
+                            first_track = first_listen_records.iloc[0]["track_name"]
+                    
                     first_listen_data[artist] = {
                         "First Listen": first_listen.strftime("%B %d, %Y") if pd.notna(first_listen) else "Unknown",
                         "First Listen Date": first_listen,
                         "First Listen Era": first_listen_era,
+                        "First Track": first_track if first_track else "Unknown",
                         "Regular Listening": regular_listening_date.strftime("%B %d, %Y") if pd.notna(regular_listening_date) else "Never",
                         "Regular Listening Date": regular_listening_date,
                         "Days to Regular": days_to_regular,
@@ -829,6 +837,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     col1, col2 = st.columns(2)
                     with col1:
                         st.metric("First Listen", info["First Listen"])
+                        st.caption(f"🎵 {info['First Track']}")
                         st.caption(f"Era: {info['First Listen Era']}")
                     with col2:
                         st.metric("Started Regular Listening", info["Regular Listening"])
