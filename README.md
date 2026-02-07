@@ -22,7 +22,6 @@ Spotify gives you year-end summaries. We give you **life-era narratives**. Defin
 📊 **Lifetime Insights** — Top artists, tracks, and listening patterns across your entire Spotify history  
 🎨 **Shareable Visualizations** — Export charts, summaries, and era cards as PDFs  
 🔒 **Privacy First** — All processing happens locally. Your data stays yours.  
-🎭 **Playful + Analytical** — Optional "era vibes" and tarot-style cards alongside real analytics
 
 ---
 
