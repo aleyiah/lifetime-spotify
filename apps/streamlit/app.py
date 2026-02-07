@@ -42,29 +42,33 @@ def looks_like_event_dict(d: Dict[str, Any]) -> Tuple[bool, str]:
 
 def validate_streaming_history_json(json_obj: Any) -> Dict[str, Any]:
     """Validate that a loaded JSON object contains listening events."""
-    result = {
-        "is_streaming_history": False,
-        "schema": None,
-        "events_found": 0,
-        "sample_event": None,
-        "reason": "",
-    }
-
     if not isinstance(json_obj, list):
-        result["reason"] = f"Top-level JSON is {type(json_obj).__name__}, expected a list of events."
-        return result
+        return {
+            "is_streaming_history": False,
+            "schema": None,
+            "events_found": 0,
+            "sample_event": None,
+            "reason": f"Top-level JSON is {type(json_obj).__name__}, expected a list of events.",
+        }
 
-    if len(json_obj) == 0:
-        result["reason"] = "JSON list is empty."
-        return result
+    if not json_obj:
+        return {
+            "is_streaming_history": False,
+            "schema": None,
+            "events_found": 0,
+            "sample_event": None,
+            "reason": "JSON list is empty.",
+        }
 
-    n = min(200, len(json_obj))
-    items = json_obj[:n]
-
-    dict_items = [x for x in items if isinstance(x, dict)]
+    dict_items = [x for x in json_obj[:200] if isinstance(x, dict)]
     if not dict_items:
-        result["reason"] = "List items are not dicts; expected dict events."
-        return result
+        return {
+            "is_streaming_history": False,
+            "schema": None,
+            "events_found": 0,
+            "sample_event": None,
+            "reason": "List items are not dicts; expected dict events.",
+        }
 
     schema_counts = {"schema_a": 0, "schema_b": 0, "unknown": 0}
     first_event = None
@@ -77,17 +81,22 @@ def validate_streaming_history_json(json_obj: Any) -> Dict[str, Any]:
 
     eventish = schema_counts["schema_a"] + schema_counts["schema_b"]
     if eventish / len(dict_items) < 0.5:
-        result["reason"] = f"Only {eventish}/{len(dict_items)} inspected items look like streaming events."
-        return result
+        return {
+            "is_streaming_history": False,
+            "schema": None,
+            "events_found": 0,
+            "sample_event": None,
+            "reason": f"Only {eventish}/{len(dict_items)} inspected items look like streaming events.",
+        }
 
     schema = "schema_a" if schema_counts["schema_a"] >= schema_counts["schema_b"] else "schema_b"
-
-    result["is_streaming_history"] = True
-    result["schema"] = schema
-    result["events_found"] = len(json_obj)
-    result["sample_event"] = first_event
-    result["reason"] = f"Validated as streaming history ({schema})."
-    return result
+    return {
+        "is_streaming_history": True,
+        "schema": schema,
+        "events_found": len(json_obj),
+        "sample_event": first_event,
+        "reason": f"Validated as streaming history ({schema}).",
+    }
 
 
 # =========================
@@ -138,42 +147,34 @@ def normalize_events(json_obj: Any, schema: str) -> list[dict]:
     Convert Schema A or B raw Spotify events into a unified column schema.
     Output columns (pre-clean): ts, ms_played, track_name, artist_name, album_name, source_schema
     """
-    rows: list[dict] = []
-
     if not isinstance(json_obj, list):
-        return rows
+        return []
 
     if schema == "schema_a":
-        for e in json_obj:
-            if not isinstance(e, dict):
-                continue
-            rows.append(
-                {
-                    "ts": e.get("endTime"),
-                    "ms_played": e.get("msPlayed"),
-                    "track_name": e.get("trackName"),
-                    "artist_name": e.get("artistName"),
-                    "album_name": None,
-                    "source_schema": "schema_a",
-                }
-            )
-
+        return [
+            {
+                "ts": e.get("endTime"),
+                "ms_played": e.get("msPlayed"),
+                "track_name": e.get("trackName"),
+                "artist_name": e.get("artistName"),
+                "album_name": None,
+                "source_schema": "schema_a",
+            }
+            for e in json_obj if isinstance(e, dict)
+        ]
     elif schema == "schema_b":
-        for e in json_obj:
-            if not isinstance(e, dict):
-                continue
-            rows.append(
-                {
-                    "ts": e.get("ts"),
-                    "ms_played": e.get("ms_played"),
-                    "track_name": e.get("master_metadata_track_name"),
-                    "artist_name": e.get("master_metadata_album_artist_name"),
-                    "album_name": e.get("master_metadata_album_album_name"),
-                    "source_schema": "schema_b",
-                }
-            )
-
-    return rows
+        return [
+            {
+                "ts": e.get("ts"),
+                "ms_played": e.get("ms_played"),
+                "track_name": e.get("master_metadata_track_name"),
+                "artist_name": e.get("master_metadata_album_artist_name"),
+                "album_name": e.get("master_metadata_album_album_name"),
+                "source_schema": "schema_b",
+            }
+            for e in json_obj if isinstance(e, dict)
+        ]
+    return []
 
 def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str], zip_hash_id: str = None) -> tuple[pd.DataFrame, dict]:
     """Validate, load, normalize, and concatenate streaming history across all JSON files.
@@ -191,8 +192,7 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str], zip
     all_rows: list[dict] = []
 
     for rel in json_rel_paths:
-        path = extract_dir / rel
-        json_obj, err = load_json_safely(path)
+        json_obj, err = load_json_safely(extract_dir / rel)
         if err:
             meta["skipped_files"].append({"file": rel, "reason": f"json parse error: {err}"})
             continue
@@ -205,31 +205,28 @@ def load_all_streaming_history(extract_dir: Path, json_rel_paths: list[str], zip
         schema = validation["schema"]
         meta["schemas"][schema] += 1
         meta["streaming_files_used"].append(rel)
-
         all_rows.extend(normalize_events(json_obj, schema))
 
+    if not all_rows:
+        return pd.DataFrame(), meta
+
     df = pd.DataFrame(all_rows)
-
-    if not df.empty:
-        df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
-        df["ts_parsed"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
-
-        df = (
-            df.dropna(subset=["ms_played", "ts_parsed"])
-              .rename(columns={"ts_parsed": "ts_utc"})
-              .drop(columns=["ts"], errors="ignore")
-              .reset_index(drop=True)
-        )
-
-        meta["total_events"] = len(df)
-
-        sensitive_cols = ["ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"]
-        df = df.drop(columns=[c for c in sensitive_cols if c in df.columns])
-
-        expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
-        missing = expected_cols - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing expected columns: {missing}")
+    df["ms_played"] = pd.to_numeric(df["ms_played"], errors="coerce")
+    df["ts_utc"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+    
+    # Drop rows with missing critical data and remove source ts column
+    df = df.dropna(subset=["ms_played", "ts_utc"]).drop(columns=["ts"], errors="ignore").reset_index(drop=True)
+    
+    meta["total_events"] = len(df)
+    
+    # Remove sensitive columns
+    sensitive_cols = {"ip_addr", "ip_address", "client_ip", "conn_ip", "network_ip"}
+    df = df.drop(columns=[c for c in sensitive_cols & set(df.columns)])
+    
+    # Validate expected columns exist
+    expected_cols = {"ts_utc", "ms_played", "track_name", "artist_name", "album_name", "source_schema"}
+    if missing := expected_cols - set(df.columns):
+        raise ValueError(f"Missing expected columns: {missing}")
 
     return df, meta
 
@@ -256,16 +253,15 @@ def ranges_overlap(a_start: pd.Timestamp, a_end_excl: pd.Timestamp,
 
 def get_era_for_timestamp(ts: pd.Timestamp, eras: list[dict]) -> str:
     """Find which era a timestamp falls into. Returns era name or 'Pre-era' if no match."""
-    if pd.isna(ts) or not eras:
+    if pd.isna(ts):
         return "Pre-era"
     
-    for era in eras:
-        era_start = month_start_utc(era["start_year"], era["start_month"])
-        era_end = next_month_start_utc(era["end_year"], era["end_month"])
-        if era_start <= ts < era_end:
-            return era["name"]
-    
-    return "Pre-era"
+    return next(
+        (era["name"] for era in eras
+         if month_start_utc(era["start_year"], era["start_month"]) <= ts 
+         < next_month_start_utc(era["end_year"], era["end_month"])),
+        "Pre-era"
+    )
 
 
 def apply_era_filter_month(df: pd.DataFrame, start_year: int, start_month: int, end_year: int, end_month: int) -> pd.DataFrame:
@@ -281,6 +277,9 @@ def safe_rerun() -> None:
         st.experimental_rerun()
 
 
+
+
+
 # =========================
 # Era persistence (ZIP-scoped)
 # =========================
@@ -290,10 +289,8 @@ LEGACY_ERAS_FILE = Path(".streamlit/eras.json")  # optional migration from Optio
 
 
 def _read_json_file(path: Path) -> Any:
-    if not path.exists():
-        return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     except Exception:
         return None
 
@@ -318,9 +315,7 @@ def load_eras_for_zip(zip_id: str) -> list[dict]:
 
 def save_eras_for_zip(zip_id: str, eras: list[dict]) -> None:
     ERAS_BY_ZIP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = _read_json_file(ERAS_BY_ZIP_FILE)
-    if not isinstance(data, dict):
-        data = {}
+    data = _read_json_file(ERAS_BY_ZIP_FILE) or {}
     data[zip_id] = eras
     ERAS_BY_ZIP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -406,12 +401,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     st.subheader("Merge all listening data")
 
-    if "df_events" not in st.session_state:
-        st.session_state.df_events = None
-    if "meta" not in st.session_state:
-        st.session_state.meta = None
-    if "merged" not in st.session_state:
-        st.session_state.merged = False
+    # Initialize session state for merge tracking
+    st.session_state.setdefault("df_events", None)
+    st.session_state.setdefault("meta", None)
+    st.session_state.setdefault("merged", False)
 
     # Track zip id in session (if upload changes, reload eras and reset merge state)
     if "zip_id" not in st.session_state or st.session_state.zip_id != current_zip_id:
@@ -609,36 +602,21 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     end_year, end_month = int(era_row["end_year"]), int(era_row["end_month"])
                     df_view = apply_era_filter_month(df_events, start_year, start_month, end_year, end_month)
                     selected_era_name = selected_era
-
+            
             # =========================================
             # SLIDE 1: STATISTICS
             # =========================================
             if st.session_state.current_slide == 1:
                 st.header("📊 Top Artists and Tracks by Era")
 
-                # Top Artists by total playtime
-                top_artists = (
-                    df_view.groupby("artist_name")["ms_played"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(10)
-                    .reset_index()
-                )
+                top_artists = df_view.groupby("artist_name")["ms_played"].sum().sort_values(ascending=False).head(10).reset_index()
                 top_artists["minutes_played"] = (top_artists["ms_played"] / 1000 / 60).round(1)
-
                 st.markdown("**Top 10 Artists by Minutes Played**")
                 st.dataframe(top_artists[["artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
 
                 # Top Tracks by total playtime
-                top_tracks = (
-                    df_view.groupby(["track_name", "artist_name"])["ms_played"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(10)
-                    .reset_index()
-                )
+                top_tracks = df_view.groupby(["track_name", "artist_name"])["ms_played"].sum().sort_values(ascending=False).head(10).reset_index()
                 top_tracks["minutes_played"] = (top_tracks["ms_played"] / 1000 / 60).round(1)
-
                 st.markdown("**Top 10 Tracks by Minutes Played**")
                 st.dataframe(top_tracks[["track_name", "artist_name", "minutes_played"]], use_container_width=True, hide_index=True)
 
@@ -648,48 +626,26 @@ with tempfile.TemporaryDirectory() as tmpdir:
             elif st.session_state.current_slide == 2:
                 st.subheader("Listening Trends: Top 10 Artists Over Time")
                 
-                top_artists = (
-                    df_view.groupby("artist_name")["ms_played"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(10)
-                    .reset_index()
-                )
+                top_artists = df_view.groupby("artist_name")["ms_played"].sum().sort_values(ascending=False).head(10).reset_index()
                 
                 if not top_artists.empty:
                     top10_artists = top_artists["artist_name"].tolist()
                     df_top = df_events[df_events["artist_name"].isin(top10_artists)].copy()
                     # Create bi-yearly period column
-                    df_top["year"] = df_top["ts_utc"].dt.year
-                    df_top["month"] = df_top["ts_utc"].dt.month
-                    df_top["half"] = df_top["month"].apply(lambda m: 1 if m <= 6 else 2)
-                    df_top["bi_yearly"] = df_top["year"].astype(str) + " H" + df_top["half"].astype(str)
+                    df_top["bi_yearly"] = (df_top["ts_utc"].dt.year.astype(str) + " H" + 
+                                             (df_top["ts_utc"].dt.month.le(6).astype(int) + 1).astype(str))
 
                     # Pivot table: rows=artist, columns=bi-yearly, values=minutes played
-                    pivot = pd.pivot_table(
-                        df_top,
-                        index="artist_name",
-                        columns="bi_yearly",
-                        values="ms_played",
-                        aggfunc="sum",
-                        fill_value=0,
-                    )
-                    # Convert ms_played to minutes
-                    pivot = (pivot / 1000 / 60).round(1)
-                    # Add total column for sorting
-                    pivot["Total"] = pivot.sum(axis=1)
-                    pivot = pivot.sort_values("Total", ascending=False).drop(columns=["Total"])
+                    pivot = (pd.pivot_table(df_top, index="artist_name", columns="bi_yearly", values="ms_played", aggfunc="sum", fill_value=0) / 1000 / 60).round(1)
+                    pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
 
                     st.markdown(
                         "This line graph shows the minutes played for each top artist in every half-year period. "
                         "You can see when artists appear, peak, or drop off in your listening history."
                     )
                     # Prepare long-form DataFrame for plotting
-                    pivot_reset = pivot.reset_index()
-                    pivot_melt = pivot_reset.melt(id_vars="artist_name", var_name="bi_yearly", value_name="minutes_played")
-                    # Sort bi_yearly periods chronologically
-                    period_order = sorted(pivot.columns, key=lambda x: (int(x.split()[0]), int(x.split()[1][1:])) if x != "Total" else (9999, 0))
-                    pivot_melt = pivot_melt[pivot_melt["bi_yearly"].isin(period_order)]
+                    period_order = sorted(pivot.columns, key=lambda x: (int(x.split()[0]), int(x.split()[1][1:])))
+                    pivot_melt = pivot.reset_index().melt(id_vars="artist_name", var_name="bi_yearly", value_name="minutes_played")
                     pivot_melt["bi_yearly"] = pd.Categorical(pivot_melt["bi_yearly"], categories=period_order, ordered=True)
                     pivot_melt = pivot_melt.sort_values(["artist_name", "bi_yearly"])
 
@@ -763,13 +719,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 st.subheader("🎤 When Did You First Listen to These Artists?")
 
                 # Get top 25 artists by total playtime
-                top_25_artists = (
-                    df_view.groupby("artist_name")["ms_played"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(25)
-                    .reset_index()
-                )
+                top_25_artists = df_view.groupby("artist_name")["ms_played"].sum().sort_values(ascending=False).head(25).reset_index()
 
                 # Create a mapping of artist info
                 first_listen_data = {}
@@ -778,40 +728,30 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 for artist in top_25_artists["artist_name"]:
                     # Get total minutes from the era view (df_view)
                     artist_listens_era = df_view[df_view["artist_name"] == artist]
-                    total_minutes = (artist_listens_era["ms_played"].sum() / 1000 / 60)
+                    total_minutes = artist_listens_era["ms_played"].sum() / 1000 / 60
                     
                     # Get first listen and regular listening from ENTIRE history (df_events)
                     artist_listens_full = df_events[df_events["artist_name"] == artist]
                     first_listen = artist_listens_full["ts_utc"].min()
                     
-                    # Find when they started listening regularly (first day with 8+ plays) - from full history
+                    # Find when they started listening regularly (first day with 8+ plays)
                     daily_plays = artist_listens_full.groupby(artist_listens_full["ts_utc"].dt.date).size()
-                    regular_listening_date = None
-                    for date, play_count in daily_plays.items():
-                        if play_count >= 8:
-                            regular_listening_date = pd.Timestamp(date, tz=timezone.utc)
-                            break
+                    regular_listening_date = next((pd.Timestamp(d, tz=timezone.utc) for d in sorted(daily_plays.index) if daily_plays[d] >= 8), None)
                     
                     # Calculate days until regular listening
-                    days_to_regular = None
-                    if pd.notna(first_listen) and pd.notna(regular_listening_date):
-                        days_to_regular = (regular_listening_date - first_listen).days
+                    days_to_regular = (regular_listening_date - first_listen).days if pd.notna(first_listen) and pd.notna(regular_listening_date) else None
                     
-                    # Get the era for first listen
-                    first_listen_era = get_era_for_timestamp(first_listen, eras)
-                    
-                    # Get the first track they listened to by this artist
+                    # Get the first track and era
                     first_track = None
                     if pd.notna(first_listen):
-                        first_listen_records = artist_listens_full[artist_listens_full["ts_utc"] == first_listen]
-                        if not first_listen_records.empty:
-                            first_track = first_listen_records.iloc[0]["track_name"]
+                        first_track_record = artist_listens_full[artist_listens_full["ts_utc"] == first_listen].iloc[0] if not artist_listens_full[artist_listens_full["ts_utc"] == first_listen].empty else None
+                        first_track = first_track_record["track_name"] if first_track_record is not None else None
                     
                     first_listen_data[artist] = {
                         "First Listen": first_listen.strftime("%B %d, %Y") if pd.notna(first_listen) else "Unknown",
                         "First Listen Date": first_listen,
-                        "First Listen Era": first_listen_era,
-                        "First Track": first_track if first_track else "Unknown",
+                        "First Listen Era": get_era_for_timestamp(first_listen, eras),
+                        "First Track": first_track or "Unknown",
                         "Regular Listening": regular_listening_date.strftime("%B %d, %Y") if pd.notna(regular_listening_date) else "Never",
                         "Regular Listening Date": regular_listening_date,
                         "Days to Regular": days_to_regular,
